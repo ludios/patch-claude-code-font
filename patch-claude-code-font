@@ -13,10 +13,10 @@ surfaces hardcode their own sizes besides. This script patches:
                        editor.* instead of chat.editor.*, making the two
                        variables trustworthy everywhere in the webview
   webview/index.css  - point --monaco-monospace-font at the editor font, and
-                       move every monospace content surface (tool IN/OUT rows,
-                       markdown inline code, slash-command echoes, permission
-                       -request command/JSON) from hardcoded .85em/.9em sizes
-                       to var(--vscode-editor-font-size)
+                       give every monospace rule with a smaller hardcoded size
+                       (tool IN/OUT rows, header filenames, markdown inline
+                       code, slash-command echoes, permission requests, pills,
+                       git summaries, ...) var(--vscode-editor-font-size)
   webview/index.js   - pass the two variables into the embedded Monaco diff
                        editors, replacing their hardcoded fontSize: 12
 
@@ -49,12 +49,13 @@ MONACO_FONT_OPTIONS = (
 )
 
 
-def css_size(selector):
-	"""Build a (regex, replacement) pair that swaps the em-based font-size of
-	the CSS rule matched by `selector` (a regex fragment for the minified,
-	CSS-modules-suffixed selector) for the editor font size."""
-	return (re.compile("(" + selector + r"\{[^}]*?)font-size:\.(?:85|9)em"),
-	        r"\1font-size:" + EDITOR_SIZE)
+# A font-size value smaller than a typical editor font: relative (em/%),
+# sub-14px, or inherit. Larger fixed sizes (section titles, decorations)
+# are deliberately left alone.
+SMALL_SIZE = r"(?:\.\d+em|(?:1[0-3]|[1-9])px|\d{1,2}(?:\.\d+)?%|inherit)"
+# The two custom properties the webview's monospace rules take their
+# font-family from.
+MONO_FAMILY = r"var\(--app-(?:monospace-font-family|font-family-mono)\)"
 
 
 def patterns():
@@ -65,20 +66,17 @@ def patterns():
 			# Monaco widget font (hovers, suggest details).
 			(re.compile(r"--monaco-monospace-font:"),
 			 "--monaco-monospace-font:" + EDITOR_FAMILY + ","),
-			# Tool IN/OUT rows: the label and the command/output text.
-			css_size(r"\.toolBodyRowLabel_[\w-]+"),
-			css_size(r"\.toolBodyRowContent_[\w-]+ pre"),
-			css_size(r"\.toolBodyRowContent_[\w-]+ code"),
-			# Markdown code, inline and fenced, plus tool/file references.
-			css_size(r"\.root_[\w-]+ code"),
-			css_size(r"\.toolReference_[\w-]+ code"),
-			css_size(r"\.unknownContent_[\w-]+ code"),
-			# Slash-command echoes and their results.
-			css_size(r"\.slashCommand(?:Result)?Message_[\w-]+"),
-			# Permission requests: the command being approved and input JSON.
-			css_size(r"\.bashCommand_[\w-]+"),
-			css_size(r"\.inputJson_[\w-]+"),
-			css_size(r"\.permissionRequestInput_[\w-]+"),
+			# The "small monospace" size (branch pills, changed-file lists,
+			# git summaries) becomes the plain editor size.
+			(re.compile(r"--app-monospace-font-size-small:[^;}]+"),
+			 "--app-monospace-font-size-small:" + EDITOR_SIZE),
+			# Sweep: any rule that combines the monospace family with a
+			# smaller font-size gets the editor size instead, in both
+			# declaration orders (family first, then size first).
+			(re.compile("(" + MONO_FAMILY + r"[^}]*?)font-size:" + SMALL_SIZE + r"(?=[;}])"),
+			 r"\1font-size:" + EDITOR_SIZE),
+			(re.compile(r"font-size:" + SMALL_SIZE + r"(;[^}]*?" + MONO_FAMILY + r")"),
+			 "font-size:" + EDITOR_SIZE + r"\1"),
 		],
 		"webview/index.js": [
 			# The two embedded Monaco diff editors (chat diffs and previews).
