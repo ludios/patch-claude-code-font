@@ -1,0 +1,150 @@
+#!/usr/bin/env python3
+# Model-output: Claude Fable 5
+"""Patch the Claude Code VS Code extension so a preferred font comes first in
+every monospace font stack its chat webview uses.
+
+By default the chat webview inherits VS Code's editor font via
+--vscode-editor-font-family, which falls back to Consolas on Windows clients.
+This script prepends the preferred font to:
+
+  webview/index.css  - the --app-monospace-font-family / --monaco-monospace-font
+                       custom properties (all code blocks in the chat view)
+  webview/index.js   - Monaco's per-platform default editor font stacks
+  extension.js       - inline styles of the auxiliary webviews
+
+There is no load-time integrity check on these files (VS Code verifies
+extension signatures only at install time), so editing them in place is
+sufficient. Re-run after every extension update; run with --undo to restore
+the saved originals.
+
+Usage: patch-claude-code-font [--undo] [FONT]
+
+  FONT    font family to put first (default: PragmataPro Mono)
+  --undo  restore the .orig-font backups instead of patching
+"""
+
+import re
+import sys
+from pathlib import Path
+
+EXTENSIONS_ROOT = Path.home() / ".vscode-server" / "extensions"
+EXTENSION_GLOB  = "anthropic.claude-code-*"
+BACKUP_SUFFIX   = ".orig-font"
+
+
+def patterns_for(font):
+	"""Return {relative file path: [(compiled regex, replacement function)]}
+	for one extension directory. `font` is the family name to prepend; it is
+	quoted as needed for each context (CSS text vs. JS string literals)."""
+	css = f'"{font}"'
+	def prepend_js_literal(m):
+		# "Consolas, ..." -> "'PragmataPro Mono', Consolas, ..."
+		return f'"\'{font}\', {m.group(1)}"'
+	return {
+		"webview/index.css": [
+			# Covers both the --app-monospace-font-family definition (which
+			# textually ends in "font-family:var(...)") and direct usages.
+			(re.compile(r"font-family:var\(--vscode-editor-font-family"),
+			 lambda m: f"font-family:{css},var(--vscode-editor-font-family"),
+			(re.compile(r"--monaco-monospace-font:"),
+			 lambda m: f"--monaco-monospace-font:{css},"),
+		],
+		"webview/index.js": [
+			# Monaco's EDITOR_FONT_DEFAULTS for Windows / macOS / Linux.
+			(re.compile(r'"(Consolas, \'Courier New\', monospace)"'),
+			 prepend_js_literal),
+			(re.compile(r'"(Menlo, Monaco, \'Courier New\', monospace)"'),
+			 prepend_js_literal),
+			(re.compile(r'"(\'Droid Sans Mono\', \'monospace\', monospace)"'),
+			 prepend_js_literal),
+		],
+		"extension.js": [
+			(re.compile(r"font-family: var\(--vscode-editor-font-family\)"),
+			 lambda m: f'font-family: "{font}", var(--vscode-editor-font-family)'),
+			# The settings-preview webview re-declares the variable from the
+			# configured editor font; the ${...} holds a minified JS variable.
+			(re.compile(r"--vscode-editor-font-family: (\$\{[\w$]+\}) !important"),
+			 lambda m: f'--vscode-editor-font-family: "{font}", {m.group(1)} !important'),
+		],
+	}
+
+
+def extension_dirs():
+	"""Return matching extension directories, newest version last.
+	Raises SystemExit when none exist."""
+	def version_key(path):
+		digits = re.findall(r"\d+", path.name)
+		return [int(d) for d in digits]
+	dirs = sorted(EXTENSIONS_ROOT.glob(EXTENSION_GLOB), key=version_key)
+	if not dirs:
+		sys.exit(f"no {EXTENSION_GLOB} directories under {EXTENSIONS_ROOT}")
+	return dirs
+
+
+def patch_file(path, file_patterns, font):
+	"""Apply `file_patterns` to one file, saving a backup first.
+	Returns True when the file ends up patched (now or previously);
+	prints a warning for every pattern that matched nothing."""
+	if not path.is_file():
+		print(f"  {path.name}: missing, skipped")
+		return False
+	text = path.read_text(encoding="utf-8")
+	if font in text:
+		print(f"  {path.name}: already patched")
+		return True
+	ok = True
+	for regex, replacement in file_patterns:
+		text, count = regex.subn(replacement, text)
+		if count == 0:
+			print(f"  {path.name}: WARNING: no match for /{regex.pattern}/")
+			ok = False
+		else:
+			print(f"  {path.name}: {count}x /{regex.pattern}/")
+	backup = path.with_name(path.name + BACKUP_SUFFIX)
+	if not backup.exists():
+		backup.write_bytes(path.read_bytes())
+	path.write_text(text, encoding="utf-8")
+	return ok
+
+
+def undo_dir(ext_dir):
+	"""Restore every .orig-font backup under `ext_dir` and delete it."""
+	backups = list(ext_dir.rglob(f"*{BACKUP_SUFFIX}"))
+	if not backups:
+		print("  nothing to undo")
+	for backup in backups:
+		original = backup.with_name(backup.name.removesuffix(BACKUP_SUFFIX))
+		original.write_bytes(backup.read_bytes())
+		backup.unlink()
+		print(f"  restored {original.name}")
+
+
+def main():
+	args = sys.argv[1:]
+	undo = "--undo" in args
+	args = [a for a in args if a != "--undo"]
+	assert len(args) <= 1, "usage: patch-claude-code-font [--undo] [FONT]"
+	font = args[0] if args else "PragmataPro Mono"
+
+	dirs = extension_dirs()
+	newest_ok = False
+	for ext_dir in dirs:
+		print(f"{ext_dir.name}:")
+		if undo:
+			undo_dir(ext_dir)
+			continue
+		results = [
+			patch_file(ext_dir / rel, file_patterns, font)
+			for rel, file_patterns in patterns_for(font).items()
+		]
+		if ext_dir is dirs[-1]:
+			newest_ok = all(results)
+	if not undo:
+		if newest_ok:
+			print(f'done: "{font}" is first in {dirs[-1].name}; reload the VS Code window')
+		else:
+			sys.exit(f"FAILED to fully patch the newest version, {dirs[-1].name}")
+
+
+if __name__ == "__main__":
+	main()
