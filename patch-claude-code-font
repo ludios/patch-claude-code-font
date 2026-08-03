@@ -1,30 +1,33 @@
 #!/usr/bin/env python3
 # Model-output: Claude Fable 5
-"""Patch the Claude Code VS Code extension so a preferred font comes first in
-every monospace font stack its chat webview uses, and so tool IN/OUT rows use
-the same font size as code blocks.
+"""Patch the Claude Code VS Code extension so every monospace surface in its
+chat follows the user's editor.fontFamily and editor.fontSize settings.
 
-By default the chat webview inherits VS Code's editor font via
---vscode-editor-font-family, which falls back to Consolas on Windows clients.
-This script prepends the preferred font to:
+VS Code injects the real editor font into every webview as the
+--vscode-editor-font-family / --vscode-editor-font-size (px) CSS variables,
+but the extension overwrites both variables from the chat.editor.* settings
+(defaults: "monospace" / 12px, i.e. Consolas at 12px on Windows), and several
+surfaces hardcode their own sizes besides. This script patches:
 
-  webview/index.css  - the --app-monospace-font-family / --monaco-monospace-font
-                       custom properties (all code blocks in the chat view)
-  webview/index.js   - Monaco's per-platform default editor font stacks
-  extension.js       - inline styles of the auxiliary webviews
-
-It also lifts the toolBody IN/OUT row content and labels from their .85em
-font-size to the 12px the embedded Monaco diff editors hardcode.
+  extension.js       - source that override (and its change listener) from
+                       editor.* instead of chat.editor.*, making the two
+                       variables trustworthy everywhere in the webview
+  webview/index.css  - point --monaco-monospace-font at the editor font, and
+                       move every monospace content surface (tool IN/OUT rows,
+                       markdown inline code, slash-command echoes, permission
+                       -request command/JSON) from hardcoded .85em/.9em sizes
+                       to var(--vscode-editor-font-size)
+  webview/index.js   - pass the two variables into the embedded Monaco diff
+                       editors, replacing their hardcoded fontSize: 12
 
 There is no load-time integrity check on these files (VS Code verifies
 extension signatures only at install time), so editing them in place is
-sufficient. Re-run after every extension update; run with --undo to restore
-the saved originals.
+sufficient. The pristine originals are kept as .orig-font backups and re-read
+as the input on every run, so re-running (even with newly added patterns) is
+idempotent. Re-run after every extension update, then reload the VS Code
+window; run with --undo to restore the originals.
 
-Usage: patch-claude-code-font [--undo] [FONT]
-
-  FONT    font family to put first (default: PragmataPro Mono)
-  --undo  restore the .orig-font backups instead of patching
+Usage: patch-claude-code-font [--undo]
 """
 
 import re
@@ -35,52 +38,62 @@ EXTENSIONS_ROOT = Path.home() / ".vscode-server" / "extensions"
 EXTENSION_GLOB  = "anthropic.claude-code-*"
 BACKUP_SUFFIX   = ".orig-font"
 
+EDITOR_SIZE   = "var(--vscode-editor-font-size,12px)"
+EDITOR_FAMILY = "var(--vscode-editor-font-family)"
+# Same two variables, read at Monaco-editor construction time in JS.
+MONACO_FONT_OPTIONS = (
+	'fontSize:parseFloat(getComputedStyle(document.documentElement)'
+	'.getPropertyValue("--vscode-editor-font-size"))||12,'
+	'fontFamily:getComputedStyle(document.documentElement)'
+	'.getPropertyValue("--vscode-editor-font-family").trim()||void 0'
+)
 
-def patterns_for(font):
-	"""Return {relative file path: [(compiled regex, replacement function)]}
-	for one extension directory. `font` is the family name to prepend; it is
-	quoted as needed for each context (CSS text vs. JS string literals)."""
-	css = f'"{font}"'
-	def prepend_js_literal(m):
-		# "Consolas, ..." -> "'PragmataPro Mono', Consolas, ..."
-		return f'"\'{font}\', {m.group(1)}"'
+
+def css_size(selector):
+	"""Build a (regex, replacement) pair that swaps the em-based font-size of
+	the CSS rule matched by `selector` (a regex fragment for the minified,
+	CSS-modules-suffixed selector) for the editor font size."""
+	return (re.compile("(" + selector + r"\{[^}]*?)font-size:\.(?:85|9)em"),
+	        r"\1font-size:" + EDITOR_SIZE)
+
+
+def patterns():
+	"""Return {relative file path: [(compiled regex, replacement)]} for one
+	extension directory. Replacements are re.subn replacement strings."""
 	return {
 		"webview/index.css": [
-			# Covers both the --app-monospace-font-family definition (which
-			# textually ends in "font-family:var(...)") and direct usages.
-			(re.compile(r"font-family:var\(--vscode-editor-font-family"),
-			 lambda m: f"font-family:{css},var(--vscode-editor-font-family"),
+			# Monaco widget font (hovers, suggest details).
 			(re.compile(r"--monaco-monospace-font:"),
-			 lambda m: f"--monaco-monospace-font:{css},"),
-			# The tool IN/OUT rows (e.g. Bash commands and their output) render
-			# at .85em of the 13px chat font, ~1px smaller than the diff/code
-			# blocks, which are embedded Monaco editors hardcoded to
-			# createDiffEditor(..., fontSize: 12) in webview/index.js. Pin the
-			# rows to that same 12px. (--vscode-editor-font-size is unreliable
-			# here: the webview overrides it from chat.editor.fontSize.)
-			(re.compile(r"(\.toolBodyRowLabel_\w+\{[^}]*?)font-size:\.85em"),
-			 r"\1font-size:12px"),
-			(re.compile(r"(\.toolBodyRowContent_\w+ pre\{[^}]*?)font-size:\.85em"),
-			 r"\1font-size:12px"),
-			(re.compile(r"(\.toolBodyRowContent_\w+ code\{[^}]*?)font-size:\.85em"),
-			 r"\1font-size:12px"),
+			 "--monaco-monospace-font:" + EDITOR_FAMILY + ","),
+			# Tool IN/OUT rows: the label and the command/output text.
+			css_size(r"\.toolBodyRowLabel_[\w-]+"),
+			css_size(r"\.toolBodyRowContent_[\w-]+ pre"),
+			css_size(r"\.toolBodyRowContent_[\w-]+ code"),
+			# Markdown code, inline and fenced, plus tool/file references.
+			css_size(r"\.root_[\w-]+ code"),
+			css_size(r"\.toolReference_[\w-]+ code"),
+			css_size(r"\.unknownContent_[\w-]+ code"),
+			# Slash-command echoes and their results.
+			css_size(r"\.slashCommand(?:Result)?Message_[\w-]+"),
+			# Permission requests: the command being approved and input JSON.
+			css_size(r"\.bashCommand_[\w-]+"),
+			css_size(r"\.inputJson_[\w-]+"),
+			css_size(r"\.permissionRequestInput_[\w-]+"),
 		],
 		"webview/index.js": [
-			# Monaco's EDITOR_FONT_DEFAULTS for Windows / macOS / Linux.
-			(re.compile(r'"(Consolas, \'Courier New\', monospace)"'),
-			 prepend_js_literal),
-			(re.compile(r'"(Menlo, Monaco, \'Courier New\', monospace)"'),
-			 prepend_js_literal),
-			(re.compile(r'"(\'Droid Sans Mono\', \'monospace\', monospace)"'),
-			 prepend_js_literal),
+			# The two embedded Monaco diff editors (chat diffs and previews).
+			(re.compile(r'theme:"vs-dark",fontSize:12'),
+			 'theme:"vs-dark",' + MONACO_FONT_OPTIONS),
 		],
 		"extension.js": [
-			(re.compile(r"font-family: var\(--vscode-editor-font-family\)"),
-			 lambda m: f'font-family: "{font}", var(--vscode-editor-font-family)'),
-			# The settings-preview webview re-declares the variable from the
-			# configured editor font; the ${...} holds a minified JS variable.
-			(re.compile(r"--vscode-editor-font-family: (\$\{[\w$]+\}) !important"),
-			 lambda m: f'--vscode-editor-font-family: "{font}", {m.group(1)} !important'),
+			# Feed the webview override from editor.* instead of chat.editor.*
+			# (covers notifyFontConfigurationChange and the inline-HTML
+			# webview that re-declares the variables with !important) ...
+			(re.compile(r'getConfiguration\("chat\.editor"\)'),
+			 'getConfiguration("editor")'),
+			# ... and re-point its configuration-change listener accordingly.
+			(re.compile(r'affectsConfiguration\("chat\.(editor\.font(?:Size|Family|Weight))"\)'),
+			 r'affectsConfiguration("\1")'),
 		],
 	}
 
@@ -97,11 +110,11 @@ def extension_dirs():
 	return dirs
 
 
-def patch_file(path, file_patterns, font):
+def patch_file(path, file_patterns):
 	"""Apply `file_patterns` to one file. The pristine original is kept at
-	<name>.orig-font and is re-read as the input on every run, so re-running
-	(even with newly added patterns) is idempotent. Returns True when every
-	pattern matched; prints a warning for each that did not."""
+	<name>.orig-font and is re-read as the input on every run. Returns True
+	when every pattern matched; prints a warning for each that did not (the
+	signal that an extension update changed the minified code)."""
 	if not path.is_file():
 		print(f"  {path.name}: missing, skipped")
 		return False
@@ -110,7 +123,6 @@ def patch_file(path, file_patterns, font):
 		text = backup.read_text(encoding="utf-8")
 	else:
 		text = path.read_text(encoding="utf-8")
-		assert font not in text, f"{path} contains {font!r} but has no backup"
 		backup.write_text(text, encoding="utf-8")
 	ok = True
 	for regex, replacement in file_patterns:
@@ -139,9 +151,7 @@ def undo_dir(ext_dir):
 def main():
 	args = sys.argv[1:]
 	undo = "--undo" in args
-	args = [a for a in args if a != "--undo"]
-	assert len(args) <= 1, "usage: patch-claude-code-font [--undo] [FONT]"
-	font = args[0] if args else "PragmataPro Mono"
+	assert all(a == "--undo" for a in args), "usage: patch-claude-code-font [--undo]"
 
 	dirs = extension_dirs()
 	newest_ok = False
@@ -151,14 +161,14 @@ def main():
 			undo_dir(ext_dir)
 			continue
 		results = [
-			patch_file(ext_dir / rel, file_patterns, font)
-			for rel, file_patterns in patterns_for(font).items()
+			patch_file(ext_dir / rel, file_patterns)
+			for rel, file_patterns in patterns().items()
 		]
 		if ext_dir is dirs[-1]:
 			newest_ok = all(results)
 	if not undo:
 		if newest_ok:
-			print(f'done: "{font}" is first in {dirs[-1].name}; reload the VS Code window')
+			print(f"done: chat monospace follows editor.fontFamily/fontSize in {dirs[-1].name}; reload the VS Code window")
 		else:
 			sys.exit(f"FAILED to fully patch the newest version, {dirs[-1].name}")
 
