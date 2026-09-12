@@ -80,8 +80,11 @@ def patterns():
 		],
 		"webview/index.js": [
 			# The two embedded Monaco diff editors (chat diffs and previews).
-			(re.compile(r'theme:"vs-dark",fontSize:12'),
-			 'theme:"vs-dark",' + MONACO_FONT_OPTIONS),
+			# Anchored on the createDiffEditor call rather than neighbouring
+			# options, which change between versions (2.1.270 dropped
+			# theme:"vs-dark").
+			(re.compile(r'(createDiffEditor\([\w.]+,\{[^;]*?)fontSize:12(?=[,}])'),
+			 r"\1" + MONACO_FONT_OPTIONS),
 		],
 		"extension.js": [
 			# Feed the webview override from editor.* instead of chat.editor.*
