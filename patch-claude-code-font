@@ -16,7 +16,9 @@ surfaces hardcode their own sizes besides. This script patches:
                        give every monospace rule with a smaller hardcoded size
                        (tool IN/OUT rows, header filenames, markdown inline
                        code, slash-command echoes, permission requests, pills,
-                       git summaries, ...) var(--vscode-editor-font-size)
+                       git summaries, ...) var(--vscode-editor-font-size);
+                       also bring the answered-AskUserQuestion review box's
+                       shrunken chat-font text back to the normal chat size
   webview/index.js   - pass the two variables into the embedded Monaco diff
                        editors, replacing their hardcoded fontSize: 12
 
@@ -77,6 +79,15 @@ def patterns():
 			 r"\1font-size:" + EDITOR_SIZE),
 			(re.compile(r"font-size:" + SMALL_SIZE + r"(;[^}]*?" + MONO_FAMILY + r")"),
 			 "font-size:" + EDITOR_SIZE + r"\1"),
+			# The read-only "Answered · N questions" review reuses the
+			# question prompt's .95em/.9em/.85em text, which is sized for
+			# the prompt's 1.1em container but renders tiny inside a 1em
+			# tool body. Append a rule giving the review's text the normal
+			# chat size; the CSS-module hash is captured from the reviewBody
+			# rule, since it changes between versions.
+			(re.compile(r"(\.reviewBody_([\w-]+)\{[^}]*\})"),
+			 r"\1.reviewBody_\2 :is(.questionTextLarge_\2,.optionLabel_\2,"
+			 r".optionDescription_\2){font-size:1em}"),
 		],
 		"webview/index.js": [
 			# The two embedded Monaco diff editors (chat diffs and previews).
