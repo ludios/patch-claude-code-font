@@ -17,8 +17,10 @@ surfaces hardcode their own sizes besides. This script patches:
                        (tool IN/OUT rows, header filenames, markdown inline
                        code, slash-command echoes, permission requests, pills,
                        git summaries, ...) var(--vscode-editor-font-size);
-                       also bring the answered-AskUserQuestion review box's
-                       shrunken chat-font text back to the normal chat size
+                       also bring shrunken chat-font text (the
+                       answered-AskUserQuestion review box, and the secondary
+                       line under tool headers: "Answered · N questions",
+                       "Added N lines", ...) back to the normal chat size
   webview/index.js   - pass the two variables into the embedded Monaco diff
                        editors, replacing their hardcoded fontSize: 12
 
@@ -88,6 +90,11 @@ def patterns():
 			(re.compile(r"(\.reviewBody_([\w-]+)\{[^}]*\})"),
 			 r"\1.reviewBody_\2 :is(.questionTextLarge_\2,.optionLabel_\2,"
 			 r".optionDescription_\2){font-size:1em}"),
+			# The secondary line under tool headers ("Answered · N
+			# questions", "Added N lines", tool descriptions, "Edit failed",
+			# ...) is shrunk to .85em; give it the normal chat size.
+			(re.compile(r"(\.secondaryLine_[\w-]+\{[^}]*?)font-size:[^;}]+"),
+			 r"\1font-size:1em"),
 		],
 		"webview/index.js": [
 			# The two embedded Monaco diff editors (chat diffs and previews).
